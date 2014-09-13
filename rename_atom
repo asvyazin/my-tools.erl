@@ -57,7 +57,9 @@ do_rename_atom(Filename, From, To) ->
 	    io:format("error parsing file ~p~n", [Filename]);
 	changed ->
 	    RootForm = erl_syntax:form_list(NewForms),
-	    NewContent = erl_prettypr:format(RootForm),
+	    Comments = erl_comment_scan:file(Filename),
+	    RootForm1 = erl_recomment:recomment_forms(RootForm, Comments),
+	    NewContent = erl_prettypr:format(RootForm1),
 	    io:format("will change file ~p~n", [Filename]),
 	    change_file_content(Filename, NewContent);
 	_ -> ok
