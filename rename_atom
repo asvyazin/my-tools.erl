@@ -1,0 +1,112 @@
+#!/usr/bin/env escript
+%% -*- erlang -*-
+
+-include_lib("kernel/include/file.hrl").
+
+main([StartDir, FromStr, ToStr]) ->
+    From = list_to_atom(FromStr),
+    To = list_to_atom(ToStr),
+    enumerate_files(StartDir, fun (Filename) ->
+				      rename_atom(Filename, From, To)
+			      end).
+
+enumerate_files(StartDir, Callback) ->
+    {ok, CurrentDirectory} = file:get_cwd(),
+    visit_directory(filename:join(CurrentDirectory, StartDir), Callback).
+
+visit_directory(Directory, Callback) ->
+    io:format("processing directory ~p~n", [Directory]),
+    {ok, Files} = file:list_dir(Directory),
+    case Files of
+	[] -> ok;
+	_ -> visit_files([filename:join(Directory, F) || F <- Files], Callback)
+    end.
+
+visit_files([], _Callback) ->
+    ok;
+visit_files([F | Files], Callback) ->
+    case get_file_type(F) of
+	directory -> visit_directory(F, Callback);
+	regular -> visit_file(F, Callback);
+	Type -> io:format("unsupported file type: ~p~n", [Type])
+    end,
+    visit_files(Files, Callback).
+
+get_file_type(Filename) ->
+    {ok, #file_info{ type = Type }} = file:read_file_info(Filename),
+    Type.
+
+visit_file(File, Callback) ->
+    io:format("processing file ~p~n", [File]),
+    Callback(File).
+
+rename_atom(Filename, From, To) ->
+    case filename:extension(Filename) of
+	".erl" ->
+	    do_rename_atom(Filename, From, To);
+	_ -> ok
+    end.
+
+do_rename_atom(Filename, From, To) ->
+    ModuleNameAsAtom = list_to_atom(filename:basename(Filename, ".erl")),
+    DoRenameFile = ModuleNameAsAtom == From,
+    {ok, Forms} = epp_dodger:parse_file(Filename),
+    {NewForms, Flag} = do_rename_atom_in_forms(Filename, Forms, From, To),
+    case Flag of
+	error ->
+	    io:format("error parsing file ~p~n", [Filename]);
+	changed ->
+	    RootForm = erl_syntax:form_list(NewForms),
+	    NewContent = erl_prettypr:format(RootForm),
+	    io:format("will change file ~p~n", [Filename]),
+	    change_file_content(Filename, NewContent);
+	_ -> ok
+    end,
+    case DoRenameFile of
+	true ->
+	    DirName = filename:dirname(Filename),
+	    NewFilename = filename:join(DirName, atom_to_list(To) ++ ".erl"),
+	    io:format("will rename file from ~p to ~p~n", [Filename, NewFilename]),
+	    file:rename(Filename, NewFilename);
+	_ -> ok
+    end.
+
+do_rename_atom_in_forms(Filename, Forms, From, To) ->
+    lists:mapfoldl(fun (F, Flag) ->
+			   {NewF, NewFlag} = rename_atom_in_form(F, From, To),
+			   case NewFlag of
+			       error -> {NewF, error};
+			       changed ->
+				   NewFlag2 = case Flag of
+						  error -> error;
+						  _ -> NewFlag
+					      end,
+				   {NewF, NewFlag2};
+			       _ -> {F, Flag}
+			   end
+		   end, not_changed, Forms).
+
+rename_atom_in_form(Form, From, To) ->
+    erl_syntax_lib:mapfold(fun (F, Flag) ->
+				   case erl_syntax:type(F) of
+				       atom ->
+					   case erl_syntax:atom_value(F) of
+					       From ->
+						   NewFlag = case Flag of
+								 error -> error;
+								 _ -> changed
+							     end,
+						   {erl_syntax:copy_attrs(F, erl_syntax:atom(To)), NewFlag};
+					       _ -> {F, Flag}
+					   end;
+				       error_marker -> {F, error};
+				       _ -> {F, Flag}
+				   end
+			   end, not_changed, Form).
+
+change_file_content(Filename, NewContent) ->
+    DirName = filename:dirname(Filename),
+    BaseFilename = filename:basename(Filename),
+    BakFilename = filename:join(DirName, BaseFilename ++ ".bak"),
+    {ok, _} = file:copy(Filename, BakFilename),
+    file:write_file(Filename, list_to_binary(NewContent)).
